@@ -1,5 +1,6 @@
 mod cli;
 mod dns;
+mod records;
 mod stats;
 
 use clap::Parser;

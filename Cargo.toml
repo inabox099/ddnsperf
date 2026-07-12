@@ -13,6 +13,11 @@ hickory-proto  = "0.24"
 tokio          = { version = "1", features = ["full"] }
 clap           = { version = "4", features = ["derive"] }
 base64         = "0.22"
+governor       = "0.6"
+indicatif      = "0.17"
+ipnet          = "2"
+rand           = "0.8"
+nonzero_ext    = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
