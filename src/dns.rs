@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// TSIG authentication configuration.
+#[derive(Clone)]
 pub struct TsigConfig {
     pub key_name:  Name,
     pub algorithm: TsigAlgorithm,
