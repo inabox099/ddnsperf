@@ -1,6 +1,7 @@
 mod cli;
 mod dns;
 mod engine;
+mod perf;
 mod records;
 mod stats;
 
