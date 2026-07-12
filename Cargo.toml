@@ -1,0 +1,18 @@
+[package]
+name = "ddnsperf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ddnsperf"
+path = "src/main.rs"
+
+[dependencies]
+hickory-client = "0.24"
+hickory-proto  = "0.24"
+tokio          = { version = "1", features = ["full"] }
+clap           = { version = "4", features = ["derive"] }
+base64         = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
