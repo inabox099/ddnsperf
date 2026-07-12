@@ -52,13 +52,30 @@ pub struct Args {
     #[arg(long, conflicts_with = "requests")]
     pub duration: Option<u64>,
 
-    /// Target transactions per second (omit for unlimited)
+    /// Target transactions per second, or 'auto' to run a perf test first
     #[arg(long)]
-    pub rps: Option<u32>,
+    pub rps: Option<String>,
 
     /// Number of concurrent Tokio tasks (default: 50)
     #[arg(short = 'c', long, default_value_t = 50)]
     pub concurrency: usize,
+
+    // ── Perf test ──────────────────────────────────────────────────────────
+    /// Find max sustainable throughput via PID (mutually exclusive with --rps)
+    #[arg(long, conflicts_with = "rps")]
+    pub perf_test: bool,
+
+    /// Error rate setpoint for --perf-test or --rps auto (default: 1.0%)
+    #[arg(long, default_value_t = 1.0)]
+    pub error_target: f64,
+
+    /// Safety cap on RPS during perf test
+    #[arg(long)]
+    pub max_rps_cap: Option<u32>,
+
+    /// Duration of perf test search in seconds (default: 120)
+    #[arg(long, default_value_t = 120)]
+    pub perf_duration: u64,
 
     // ── Transport ─────────────────────────────────────────────────────────
     /// Use TCP transport (default: UDP)
@@ -103,8 +120,13 @@ pub struct Config {
     pub mode:        Mode,
     pub requests:    Option<u64>,
     pub duration:    Option<u64>,
-    pub concurrency: usize,
     pub rps:         Option<u32>,
+    pub rps_auto:    bool,
+    pub concurrency: usize,
+    pub perf_test:   bool,
+    pub error_target: f64,
+    pub max_rps_cap: Option<u32>,
+    pub perf_duration: u64,
     pub transport:   crate::dns::TransportConfig,
 }
 
@@ -166,6 +188,12 @@ impl Args {
             _ => unreachable!("clap enforces tsig_name and tsig_secret together"),
         };
 
+        let (rps, rps_auto) = match self.rps.as_deref() {
+            None          => (None, false),
+            Some("auto")  => (None, true),
+            Some(n)       => (Some(n.parse::<u32>().map_err(|_| format!("invalid --rps: '{}'", n))?), false),
+        };
+
         let transport = crate::dns::TransportConfig {
             transport: if self.tcp { crate::dns::Transport::Tcp } else { crate::dns::Transport::Udp },
             ip_version: match (self.ipv4, self.ipv6) {
@@ -181,7 +209,12 @@ impl Args {
             requests: self.requests,
             duration: self.duration,
             concurrency: self.concurrency,
-            rps: self.rps,
+            rps,
+            rps_auto,
+            perf_test:    self.perf_test,
+            error_target: self.error_target,
+            max_rps_cap:  self.max_rps_cap,
+            perf_duration: self.perf_duration,
             transport,
         })
     }
@@ -204,6 +237,10 @@ mod tests {
             requests:    Some(100),
             duration:    None,
             rps:         None,
+            perf_test:   false,
+            error_target: 1.0,
+            max_rps_cap: None,
+            perf_duration: 120,
             concurrency: 50,
             tcp:         false,
             udp:         false,
@@ -281,5 +318,30 @@ mod tests {
         a.tcp = true;
         let cfg = a.into_config().unwrap();
         assert!(matches!(cfg.transport.transport, crate::dns::Transport::Tcp));
+    }
+
+    #[test]
+    fn rps_auto_sets_flag() {
+        let mut a = base_args();
+        a.rps = Some("auto".to_string());
+        let cfg = a.into_config().unwrap();
+        assert!(cfg.rps_auto);
+        assert!(cfg.rps.is_none());
+    }
+
+    #[test]
+    fn rps_numeric_parses() {
+        let mut a = base_args();
+        a.rps = Some("200".to_string());
+        let cfg = a.into_config().unwrap();
+        assert_eq!(cfg.rps, Some(200));
+        assert!(!cfg.rps_auto);
+    }
+
+    #[test]
+    fn rps_invalid_errors() {
+        let mut a = base_args();
+        a.rps = Some("fast".to_string());
+        assert!(a.into_config().is_err());
     }
 }
