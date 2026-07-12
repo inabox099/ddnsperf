@@ -21,6 +21,7 @@ pub struct BenchmarkConfig {
     pub concurrency: usize,
     pub total:       Option<u64>,
     pub rps:         Option<u32>,
+    pub cancel:      tokio::sync::watch::Receiver<bool>,
 }
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -49,9 +50,11 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
         let sent     = sent.clone();
         let tsig_arc = cfg.tsig.clone();
         let pb       = progress.clone();
+        let cancel   = cfg.cancel.clone();
 
         handles.push(tokio::spawn(async move {
             loop {
+                if *cancel.borrow() { break; }
                 let n = sent.fetch_add(1, Ordering::Relaxed);
                 if n >= total {
                     sent.fetch_sub(1, Ordering::Relaxed);
@@ -114,5 +117,18 @@ mod tests {
         }
 
         assert_eq!(accepted, total);
+    }
+
+    #[tokio::test]
+    async fn cancel_receiver_borrow_false_by_default() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        assert!(!*rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn cancel_receiver_sees_true_after_send() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+        assert!(*rx.borrow());
     }
 }

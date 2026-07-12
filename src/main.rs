@@ -8,6 +8,26 @@ use std::sync::Arc;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
+fn build_progress_bar(requests: Option<u64>) -> ProgressBar {
+    if let Some(n) = requests {
+        let pb = ProgressBar::new(n);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len}  {per_sec} tx/s"
+            )
+            .unwrap()
+            .progress_chars("█░"),
+        );
+        pb
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("[{elapsed_precise}] {spinner} {pos} sent").unwrap(),
+        );
+        pb
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = cli::Args::parse();
@@ -40,24 +60,15 @@ async fn main() {
             config.mode == cli::Mode::Random,
         ));
 
-        let pb = if let Some(n) = config.requests {
-            let pb = ProgressBar::new(n);
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len}  {per_sec} tx/s"
-                )
-                .unwrap()
-                .progress_chars("█░"),
-            );
-            pb
-        } else {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::with_template("[{elapsed_precise}] {spinner} {pos} sent")
-                    .unwrap(),
-            );
-            pb
-        };
+        // Duration cancellation
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        if let Some(secs) = config.duration {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                let _ = cancel_tx.send(true);
+            });
+            // else: cancel_tx dropped → channel never fires
+        }
 
         let bench_cfg = engine::BenchmarkConfig {
             server:      config.server,
@@ -68,8 +79,10 @@ async fn main() {
             concurrency: config.concurrency,
             total:       config.requests,
             rps:         config.rps,
+            cancel:      cancel_rx,
         };
 
+        let pb = build_progress_bar(config.requests);
         let report = engine::run_benchmark(bench_cfg, pb).await;
         stats::print_run_report(&report);
 
@@ -78,7 +91,6 @@ async fn main() {
         let hostname = config.hostname.expect("hostname required in single-shot mode");
         let ip       = config.ip.expect("ip required in single-shot mode");
         let ptr_zone = config.ptr_zone.unwrap_or_else(|| {
-            // Derive /24 reverse zone from the IP (e.g. 10.0.0.55 → 0.0.10.in-addr.arpa.)
             let o = ip.octets();
             hickory_proto::rr::Name::from_str_relaxed(
                 &format!("{}.{}.{}.in-addr.arpa.", o[2], o[1], o[0])

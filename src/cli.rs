@@ -48,6 +48,10 @@ pub struct Args {
     #[arg(short = 'r', long)]
     pub requests: Option<u64>,
 
+    /// Run for this many seconds instead of a fixed request count
+    #[arg(long, conflicts_with = "requests")]
+    pub duration: Option<u64>,
+
     /// Target transactions per second (omit for unlimited)
     #[arg(long)]
     pub rps: Option<u32>,
@@ -81,6 +85,7 @@ pub struct Config {
     pub prefix:      String,
     pub mode:        Mode,
     pub requests:    Option<u64>,
+    pub duration:    Option<u64>,
     pub concurrency: usize,
     pub rps:         Option<u32>,
 }
@@ -147,6 +152,7 @@ impl Args {
             server, zone, ptr_zone, hostname, ip, tsig,
             network, prefix: self.prefix, mode,
             requests: self.requests,
+            duration: self.duration,
             concurrency: self.concurrency,
             rps: self.rps,
         })
@@ -168,6 +174,7 @@ mod tests {
             hostname:    None,
             ip:          None,
             requests:    Some(100),
+            duration:    None,
             rps:         None,
             concurrency: 50,
             tsig_name:   None,
