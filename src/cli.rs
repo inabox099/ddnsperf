@@ -60,6 +60,23 @@ pub struct Args {
     #[arg(short = 'c', long, default_value_t = 50)]
     pub concurrency: usize,
 
+    // ── Transport ─────────────────────────────────────────────────────────
+    /// Use TCP transport (default: UDP)
+    #[arg(long, conflicts_with = "udp")]
+    pub tcp: bool,
+
+    /// Use UDP transport (default)
+    #[arg(long, conflicts_with = "tcp")]
+    pub udp: bool,
+
+    /// Force IPv4 transport to the DNS server
+    #[arg(long, conflicts_with = "ipv6")]
+    pub ipv4: bool,
+
+    /// Force IPv6 transport to the DNS server
+    #[arg(long, conflicts_with = "ipv4")]
+    pub ipv6: bool,
+
     // ── TSIG ──────────────────────────────────────────────────────────────
     /// TSIG key name (requires --tsig-secret)
     #[arg(long, requires = "tsig_secret")]
@@ -88,6 +105,7 @@ pub struct Config {
     pub duration:    Option<u64>,
     pub concurrency: usize,
     pub rps:         Option<u32>,
+    pub transport:   crate::dns::TransportConfig,
 }
 
 impl Args {
@@ -148,6 +166,15 @@ impl Args {
             _ => unreachable!("clap enforces tsig_name and tsig_secret together"),
         };
 
+        let transport = crate::dns::TransportConfig {
+            transport: if self.tcp { crate::dns::Transport::Tcp } else { crate::dns::Transport::Udp },
+            ip_version: match (self.ipv4, self.ipv6) {
+                (true, _) => crate::dns::IpVersion::V4,
+                (_, true) => crate::dns::IpVersion::V6,
+                _         => crate::dns::IpVersion::Auto,
+            },
+        };
+
         Ok(Config {
             server, zone, ptr_zone, hostname, ip, tsig,
             network, prefix: self.prefix, mode,
@@ -155,6 +182,7 @@ impl Args {
             duration: self.duration,
             concurrency: self.concurrency,
             rps: self.rps,
+            transport,
         })
     }
 }
@@ -177,6 +205,10 @@ mod tests {
             duration:    None,
             rps:         None,
             concurrency: 50,
+            tcp:         false,
+            udp:         false,
+            ipv4:        false,
+            ipv6:        false,
             tsig_name:   None,
             tsig_secret: None,
             tsig_algo:   "hmac-sha256".to_string(),
@@ -234,5 +266,20 @@ mod tests {
         let mut a = base_args();
         a.mode = "zigzag".to_string();
         assert!(a.into_config().is_err());
+    }
+
+    #[test]
+    fn default_transport_is_udp_auto() {
+        let cfg = base_args().into_config().unwrap();
+        assert!(matches!(cfg.transport.transport,  crate::dns::Transport::Udp));
+        assert!(matches!(cfg.transport.ip_version, crate::dns::IpVersion::Auto));
+    }
+
+    #[test]
+    fn tcp_flag_sets_tcp_transport() {
+        let mut a = base_args();
+        a.tcp = true;
+        let cfg = a.into_config().unwrap();
+        assert!(matches!(cfg.transport.transport, crate::dns::Transport::Tcp));
     }
 }

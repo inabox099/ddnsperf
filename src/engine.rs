@@ -22,6 +22,7 @@ pub struct BenchmarkConfig {
     pub total:       Option<u64>,
     pub rps:         Option<u32>,
     pub cancel:      tokio::sync::watch::Receiver<bool>,
+    pub transport:   crate::dns::TransportConfig,
 }
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -51,6 +52,7 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
         let tsig_arc = cfg.tsig.clone();
         let pb       = progress.clone();
         let cancel   = cfg.cancel.clone();
+        let transport = cfg.transport.clone();
 
         handles.push(tokio::spawn(async move {
             loop {
@@ -77,6 +79,7 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
                     rec.hostname,
                     rec.ip,
                     tsig,
+                    transport.clone(),
                 ).await;
                 let latency_us = t0.elapsed().as_micros() as u64;
 

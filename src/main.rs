@@ -80,6 +80,7 @@ async fn main() {
             total:       config.requests,
             rps:         config.rps,
             cancel:      cancel_rx,
+            transport:   config.transport,
         };
 
         let pb = build_progress_bar(config.requests);
@@ -104,6 +105,7 @@ async fn main() {
             hostname,
             ip,
             config.tsig,
+            config.transport,
         ).await {
             Ok(result) => stats::print_report(&result),
             Err(e) => {

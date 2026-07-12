@@ -1,5 +1,6 @@
 use hickory_client::client::{AsyncClient, ClientConnection, ClientHandle, Signer};
 use hickory_client::udp::UdpClientConnection;
+use hickory_client::tcp::TcpClientConnection;
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::rr::rdata::{A, PTR};
 use hickory_proto::rr::dnssec::tsig::TSigner;
@@ -9,6 +10,20 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+// ── Transport configuration ──────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default)]
+pub enum Transport { #[default] Udp, Tcp }
+
+#[derive(Clone, Debug, Default)]
+pub enum IpVersion { #[default] Auto, V4, V6 }
+
+#[derive(Clone, Debug, Default)]
+pub struct TransportConfig {
+    pub transport:  Transport,
+    pub ip_version: IpVersion,
+}
+
 /// TSIG authentication configuration.
 #[derive(Clone)]
 pub struct TsigConfig {
@@ -17,31 +32,55 @@ pub struct TsigConfig {
     pub secret:    Vec<u8>, // raw bytes; caller decodes base64
 }
 
-/// Builds an AsyncClient signed with TSIG.
-async fn tsig_client(
-    server: SocketAddr,
-    tsig: TsigConfig,
-) -> Result<(AsyncClient, impl std::future::Future<Output = Result<(), hickory_proto::error::ProtoError>> + Send), Box<dyn std::error::Error + Send + Sync>> {
-    let tsigner = TSigner::new(tsig.secret, tsig.algorithm, tsig.key_name, 300)?;
-    let signer = Arc::new(Signer::from(tsigner));
-    let conn = UdpClientConnection::new(server)?;
-    let stream = conn.new_stream(Some(signer));
-    let (client, bg) = AsyncClient::connect(stream).await?;
-    Ok((client, bg))
+/// Builds an AsyncClient with optional TSIG and transport config.
+/// Spawns the background driver task internally.
+async fn build_client(
+    server:    SocketAddr,
+    tsig:      Option<TsigConfig>,
+    transport: &TransportConfig,
+) -> Result<AsyncClient, Box<dyn std::error::Error + Send + Sync>> {
+    let signer: Option<Arc<Signer>> = tsig.map(|t| {
+        let tsigner = TSigner::new(t.secret, t.algorithm, t.key_name, 300)
+            .expect("valid TSIG config");
+        Arc::new(Signer::from(tsigner))
+    });
+
+    let bind_addr: Option<SocketAddr> = match transport.ip_version {
+        IpVersion::V4 => Some("0.0.0.0:0".parse().unwrap()),
+        IpVersion::V6 => Some("[::]:0".parse().unwrap()),
+        IpVersion::Auto => None,
+    };
+
+    match transport.transport {
+        Transport::Udp => {
+            let conn = UdpClientConnection::with_bind_addr_and_timeout(
+                server, bind_addr, Duration::from_secs(5),
+            )?;
+            let stream = conn.new_stream(signer);
+            let (client, bg) = AsyncClient::connect(stream).await?;
+            tokio::spawn(bg);
+            Ok(client)
+        }
+        Transport::Tcp => {
+            let conn = TcpClientConnection::with_bind_addr_and_timeout(
+                server, bind_addr, Duration::from_secs(5),
+            )?;
+            let stream = conn.new_stream(signer);
+            let (client, bg) = AsyncClient::connect(stream).await?;
+            tokio::spawn(bg);
+            Ok(client)
+        }
+    }
 }
 
 /// Sends a single unsigned A-record add update to the server.
-/// Returns the round-trip time on success.
 pub async fn send_add_a(
     server: SocketAddr,
     zone: Name,
     hostname: Name,
     ip: Ipv4Addr,
 ) -> Result<Duration, Box<dyn std::error::Error + Send + Sync>> {
-    let conn = UdpClientConnection::new(server)?;
-    let stream = conn.new_stream(None);
-    let (mut client, bg) = AsyncClient::connect(stream).await?;
-    tokio::spawn(bg);
+    let mut client = build_client(server, None, &TransportConfig::default()).await?;
 
     let mut record = Record::new();
     record
@@ -62,7 +101,6 @@ pub async fn send_add_a(
 }
 
 /// Sends a single TSIG-signed A-record add update to the server.
-/// Returns the round-trip time on success.
 pub async fn send_add_a_tsig(
     server: SocketAddr,
     zone: Name,
@@ -70,8 +108,7 @@ pub async fn send_add_a_tsig(
     ip: Ipv4Addr,
     tsig: TsigConfig,
 ) -> Result<Duration, Box<dyn std::error::Error + Send + Sync>> {
-    let (mut client, bg) = tsig_client(server, tsig).await?;
-    tokio::spawn(bg);
+    let mut client = build_client(server, Some(tsig), &TransportConfig::default()).await?;
 
     let mut record = Record::new();
     record
@@ -135,27 +172,15 @@ async fn timed_delete_rrset(
 ///
 /// Each leg is timed individually. Returns a TxResult with all four latencies.
 pub async fn run_transaction(
-    server:   SocketAddr,
-    zone:     Name,
-    ptr_zone: Name,
-    hostname: Name,
-    ip:       Ipv4Addr,
-    tsig:     Option<TsigConfig>,
+    server:    SocketAddr,
+    zone:      Name,
+    ptr_zone:  Name,
+    hostname:  Name,
+    ip:        Ipv4Addr,
+    tsig:      Option<TsigConfig>,
+    transport: TransportConfig,
 ) -> Result<crate::stats::TxResult, Box<dyn std::error::Error + Send + Sync>> {
-    let mut client: AsyncClient = match tsig {
-        Some(t) => {
-            let (c, bg) = tsig_client(server, t).await?;
-            tokio::spawn(bg);
-            c
-        }
-        None => {
-            let conn = UdpClientConnection::new(server)?;
-            let stream = conn.new_stream(None);
-            let (c, bg) = AsyncClient::connect(stream).await?;
-            tokio::spawn(bg);
-            c
-        }
-    };
+    let mut client = build_client(server, tsig, &transport).await?;
 
     let ptr_name = ipv4_to_ptr_name(ip);
 
@@ -240,7 +265,7 @@ mod tests {
             secret,
         };
 
-        let result = run_transaction(server, zone, ptr_zone, hostname, ip, Some(tsig))
+        let result = run_transaction(server, zone, ptr_zone, hostname, ip, Some(tsig), TransportConfig::default())
             .await
             .expect("transaction should succeed");
 
