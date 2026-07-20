@@ -103,10 +103,6 @@ As a DDI Engineer I need to be able to benchmark or stress test the DDNS Update 
 - [ ] 
 - [ ] \<Criterion 3\>
 
----
-
-## 7. Risks and Mitigations
-
 | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|
 | \<Risk 1\> | \<High/Med/Low\> | \<High/Med/Low\> | \<Plan\> |

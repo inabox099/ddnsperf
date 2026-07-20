@@ -71,15 +71,25 @@ options {
     allow-query { any; };
 };
 
+logging {
+    channel stdout {
+        stderr;
+        severity info;
+    };
+    category default {
+        stdout;
+    };
+};
+
 zone "test.local" {
     type master;
     file "/var/cache/bind/db.test.local";
     allow-update { key "test-key"; };
 };
 
-zone "0.0.10.in-addr.arpa" {
+zone "10.in-addr.arpa" {
     type master;
-    file "/var/cache/bind/db.10.0.0";
+    file "/var/cache/bind/db.10";
     allow-update { key "test-key"; };
 };
 EOF
@@ -102,9 +112,14 @@ $TTL 300
 ns1 IN A 127.0.0.1
 EOF
 
-cat > /tmp/db.10.0.0 << 'EOF'
+cat > /tmp/db.10 << 'EOF'
 $TTL 300
-@ IN SOA ns1.test.local. admin.test.local. (1 3600 900 604800 300)
+@ IN SOA ns1.test.local. admin.test.local. (
+    1 ; serial
+    3600 ; refresh
+    900  ; retry
+    604800 ; expire
+    300 ) ; minimum
 @ IN NS ns1.test.local.
 EOF
 ```
@@ -410,6 +425,44 @@ The controller increases RPS when the server handles load cleanly and backs off 
 
 ---
 
+## Stub DNS Server (benchmarking without BIND)
+
+`stub-dns` is a minimal UDP+TCP server built into the project. It responds `NOERROR`
+to every DNS UPDATE message without touching any zone state, eliminating BIND/container
+overhead so you can measure the maximum throughput of the Rust engine itself.
+
+> **TSIG note:** the stub cannot sign responses. Run ddnsperf without `--tsig-*` flags.
+
+```bash
+# terminal 1
+./target/release/stub_dns            # listens on 127.0.0.1:5354 by default
+./target/release/stub_dns 0.0.0.0:5354  # or bind to all interfaces
+
+# terminal 2
+./target/release/ddnsperf \
+  --server 127.0.0.1:5354 \
+  --zone test.local. \
+  --network 10.0.0.0/16 \
+  --requests 50000 \
+  --concurrency 50
+```
+
+The stub prints server-side messages/second every second (4 msgs per transaction).
+Cross-referencing stub throughput with ddnsperf throughput quickly reveals
+whether a bottleneck is client-side or server-side.
+
+**Observed throughput on loopback:**
+
+| --concurrency | RPS    | avg latency |
+|---------------|--------|-------------|
+| 1             | ~1 600 | ~0.6 ms     |
+| 50            | ~10 000| ~5 ms       |
+
+> A real BIND 9 container (VFS storage) caps single-task throughput at ~36 RPS
+> (~28 ms/transaction) due to zone locking and container overhead — not the Rust code.
+
+---
+
 ## Running Tests
 
 Unit tests run without a live server:
@@ -437,13 +490,15 @@ cargo test test_run_transaction -- --ignored --nocapture
 
 ```
 src/
-├── main.rs      — CLI entry point; routes to benchmark, perf test, or single-shot
-├── cli.rs       — clap argument definitions; validated Config struct
-├── dns.rs       — hickory-dns wrapper: TSIG signing, record construction, run_transaction
-├── records.rs   — CIDR-based (hostname, ip, ptr_name) generator; sequential + random modes
-├── engine.rs    — concurrent task pool; Governor rate limiter; cancellation via watch channel
-├── perf.rs      — PID controller; shared rate limiter swap; PerfResult
-└── stats.rs     — Outcome MPSC collector; Welford online mean; RunReport; progress bar
+├── main.rs          — CLI entry point; routes to benchmark, perf test, or single-shot
+├── cli.rs           — clap argument definitions; validated Config struct
+├── dns.rs           — hickory-dns wrapper: TSIG signing, record construction, run_transaction
+├── records.rs       — CIDR-based (hostname, ip, ptr_name) generator; sequential + random modes
+├── engine.rs        — concurrent task pool; Governor rate limiter; cancellation via watch channel
+├── perf.rs          — PID controller; shared rate limiter swap; PerfResult
+├── stats.rs         — Outcome MPSC collector; Welford online mean; RunReport; progress bar
+bin/
+└── stub_dns.rs      — minimal NOERROR stub server (UDP+TCP) for dependency-free benchmarking
 ```
 
 ---
