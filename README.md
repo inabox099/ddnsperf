@@ -132,15 +132,15 @@ docker run -d --name bind-test \
   --network=host \
   -v /tmp/named.conf.test:/etc/bind/named.conf:Z \
   -v /tmp/db.test.local:/var/cache/bind/db.test.local:Z \
-  -v /tmp/db.10.0.0:/var/cache/bind/db.10.0.0:Z \
+  -v /tmp/db.10:/var/cache/bind/db.10:Z \
   internetsystemsconsortium/bind9:9.18
 
 # Podman
-podman --root /tmp/podman-test-storage --storage-driver vfs run -d \
+podman run -d \
   --name bind-test --network=host \
   -v /tmp/named.conf.test:/etc/bind/named.conf:Z \
   -v /tmp/db.test.local:/var/cache/bind/db.test.local:Z \
-  -v /tmp/db.10.0.0:/var/cache/bind/db.10.0.0:Z \
+  -v /tmp/db.10:/var/cache/bind/db.10:Z \
   internetsystemsconsortium/bind9:9.18
 ```
 
@@ -158,6 +158,8 @@ dig @127.0.0.1 -p 5353 test.local SOA +short
   --server 127.0.0.1:5353 \
   --zone test.local. \
   --network 10.0.0.0/24 \
+  --ptr-zone 10.in-addr.arpa. \
+  --delete \
   --requests 20 \
   --concurrency 4 \
   --tsig-name test-key. \
@@ -364,7 +366,7 @@ Options:
       --network <CIDR>             Subnet to generate records from, e.g. 10.0.0.0/24
       --prefix <STR>               Hostname prefix used with --network [default: host-]
       --mode <MODE>                sequential | random [default: sequential]
-      --ptr-zone <ZONE>            Reverse DNS zone (inferred from --network if omitted)
+      --ptr-zone <ZONE>            Reverse DNS zone. PTR legs only sent when explicitly provided.
       --hostname <FQDN>            Single hostname for single-shot mode (requires --ip)
       --ip <IPV4>                  IPv4 address for single-shot mode (requires --hostname)
 
@@ -373,6 +375,13 @@ Options:
       --duration <SECS>            Run for this many seconds (conflicts with --requests)
       --rps <N|auto>               Fixed RPS cap, or 'auto' to run perf test first
   -c, --concurrency <N>            Concurrent Tokio tasks [default: 50]
+      --timeout <MS>               Per-message response deadline in ms [default: 5000]
+                                   Short values create overload: effective send rate ≈ concurrency / (timeout/1000)
+
+  Transaction shape:
+      --delete                     Include delete legs (Del PTR if --ptr-zone, Del A always).
+                                   Without this flag only Add legs run; records accumulate in the zone.
+      --ptr-zone <ZONE>            Reverse DNS zone. PTR legs only sent when explicitly provided.
 
   Performance test:
       --perf-test                  Find max sustainable RPS via PID (conflicts with --rps)
@@ -460,6 +469,48 @@ whether a bottleneck is client-side or server-side.
 
 > A real BIND 9 container (VFS storage) caps single-task throughput at ~36 RPS
 > (~28 ms/transaction) due to zone locking and container overhead — not the Rust code.
+
+---
+
+## Overload testing
+
+To observe how a server behaves when it cannot keep up with requests, combine
+`--timeout` and `--concurrency`. The effective send rate is:
+
+```
+effective RPS ≈ concurrency / (timeout_ms / 1000)
+```
+
+Example — drive ~500 RPS against a server that processes ~38 RPS (BIND with
+disk-backed journal):
+
+```bash
+./target/release/ddnsperf \
+  --server 192.168.1.1:53 \
+  --zone example.com. \
+  --network 10.0.0.0/16 \
+  --concurrency 100 --timeout 200 \
+  --requests 2000 \
+  --tsig-name mykey. \
+  --tsig-secret "base64encodedSecret=="
+```
+
+Expected output when overloaded:
+
+```
+=== ddnsperf results ===
+Duration:      4.012s
+Total sent:    2000
+  Successful:   152 (7.6%)
+  Timeout:     1798 (89.9%)
+  DNS error:    50 (2.5%)  — REFUSED×50
+  Transport:     0 (0.0%)
+Throughput:    498 RPS
+  per worker:    5 RPS   (throughput / --concurrency 100)
+```
+
+> Without `--delete` records accumulate in the zone. For short overload tests
+> this is fine — drain the zone afterwards with a `--delete` run.
 
 ---
 
