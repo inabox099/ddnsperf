@@ -60,6 +60,15 @@ pub struct Args {
     #[arg(short = 'c', long, default_value_t = 50)]
     pub concurrency: usize,
 
+    /// Per-message response timeout in milliseconds [default: 5000]
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
+
+    /// Include delete legs in the transaction (Del PTR if --ptr-zone, Del A always).
+    /// Without this flag only Add legs are sent; records accumulate in the zone.
+    #[arg(long, default_value_t = false)]
+    pub delete: bool,
+
     // ── Perf test ──────────────────────────────────────────────────────────
     /// Find max sustainable throughput via PID (mutually exclusive with --rps)
     #[arg(long, conflicts_with = "rps")]
@@ -109,25 +118,27 @@ pub struct Args {
 }
 
 pub struct Config {
-    pub server:      std::net::SocketAddr,
-    pub zone:        hickory_proto::rr::Name,
-    pub ptr_zone:    Option<hickory_proto::rr::Name>,
-    pub hostname:    Option<hickory_proto::rr::Name>,
-    pub ip:          Option<std::net::Ipv4Addr>,
-    pub tsig:        Option<crate::dns::TsigConfig>,
-    pub network:     Option<ipnet::Ipv4Net>,
-    pub prefix:      String,
-    pub mode:        Mode,
-    pub requests:    Option<u64>,
-    pub duration:    Option<u64>,
-    pub rps:         Option<u32>,
-    pub rps_auto:    bool,
-    pub concurrency: usize,
-    pub perf_test:   bool,
+    pub server:       std::net::SocketAddr,
+    pub zone:         hickory_proto::rr::Name,
+    pub ptr_zone:     Option<hickory_proto::rr::Name>,
+    pub hostname:     Option<hickory_proto::rr::Name>,
+    pub ip:           Option<std::net::Ipv4Addr>,
+    pub tsig:         Option<crate::dns::TsigConfig>,
+    pub network:      Option<ipnet::Ipv4Net>,
+    pub prefix:       String,
+    pub mode:         Mode,
+    pub requests:     Option<u64>,
+    pub duration:     Option<u64>,
+    pub rps:          Option<u32>,
+    pub rps_auto:     bool,
+    pub concurrency:  usize,
+    pub perf_test:    bool,
     pub error_target: f64,
-    pub max_rps_cap: Option<u32>,
+    pub max_rps_cap:  Option<u32>,
     pub perf_duration: u64,
-    pub transport:   crate::dns::TransportConfig,
+    pub transport:    crate::dns::TransportConfig,
+    pub timeout_ms:   u64,
+    pub delete:       bool,
 }
 
 impl Args {
@@ -211,11 +222,13 @@ impl Args {
             concurrency: self.concurrency,
             rps,
             rps_auto,
-            perf_test:    self.perf_test,
-            error_target: self.error_target,
-            max_rps_cap:  self.max_rps_cap,
+            perf_test:     self.perf_test,
+            error_target:  self.error_target,
+            max_rps_cap:   self.max_rps_cap,
             perf_duration: self.perf_duration,
             transport,
+            timeout_ms:    self.timeout_ms,
+            delete:        self.delete,
         })
     }
 }
@@ -226,29 +239,31 @@ mod tests {
 
     fn base_args() -> Args {
         Args {
-            server:      "127.0.0.1:53".to_string(),
-            zone:        "example.com.".to_string(),
-            ptr_zone:    None,
-            network:     Some("10.0.0.0/24".to_string()),
-            prefix:      "host-".to_string(),
-            mode:        "sequential".to_string(),
-            hostname:    None,
-            ip:          None,
-            requests:    Some(100),
-            duration:    None,
-            rps:         None,
-            perf_test:   false,
+            server:       "127.0.0.1:53".to_string(),
+            zone:         "example.com.".to_string(),
+            ptr_zone:     None,
+            network:      Some("10.0.0.0/24".to_string()),
+            prefix:       "host-".to_string(),
+            mode:         "sequential".to_string(),
+            hostname:     None,
+            ip:           None,
+            requests:     Some(100),
+            duration:     None,
+            rps:          None,
+            perf_test:    false,
             error_target: 1.0,
-            max_rps_cap: None,
+            max_rps_cap:  None,
             perf_duration: 120,
-            concurrency: 50,
-            tcp:         false,
-            udp:         false,
-            ipv4:        false,
-            ipv6:        false,
-            tsig_name:   None,
-            tsig_secret: None,
-            tsig_algo:   "hmac-sha256".to_string(),
+            concurrency:  50,
+            timeout_ms:   5000,
+            delete:       false,
+            tcp:          false,
+            udp:          false,
+            ipv4:         false,
+            ipv6:         false,
+            tsig_name:    None,
+            tsig_secret:  None,
+            tsig_algo:    "hmac-sha256".to_string(),
         }
     }
 
@@ -343,5 +358,31 @@ mod tests {
         let mut a = base_args();
         a.rps = Some("fast".to_string());
         assert!(a.into_config().is_err());
+    }
+
+    #[test]
+    fn timeout_defaults_to_5000() {
+        let cfg = base_args().into_config().unwrap();
+        assert_eq!(cfg.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn delete_defaults_to_false() {
+        let cfg = base_args().into_config().unwrap();
+        assert!(!cfg.delete);
+    }
+
+    #[test]
+    fn ptr_zone_not_inferred_from_network() {
+        let cfg = base_args().into_config().unwrap();
+        assert!(cfg.ptr_zone.is_none());
+    }
+
+    #[test]
+    fn explicit_ptr_zone_is_parsed() {
+        let mut a = base_args();
+        a.ptr_zone = Some("0.0.10.in-addr.arpa.".to_string());
+        let cfg = a.into_config().unwrap();
+        assert!(cfg.ptr_zone.is_some());
     }
 }

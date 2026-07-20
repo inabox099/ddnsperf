@@ -31,20 +31,24 @@ fn build_progress_bar(requests: Option<u64>) -> ProgressBar {
 }
 
 fn make_bench_cfg(
-    server:      std::net::SocketAddr,
-    zone:        hickory_proto::rr::Name,
-    ptr_zone:    hickory_proto::rr::Name,
-    generator:   Arc<records::RecordGenerator>,
-    tsig:        Option<Arc<dns::TsigConfig>>,
-    concurrency: usize,
-    total:       Option<u64>,
-    rps:         Option<u32>,
-    transport:   dns::TransportConfig,
-    cancel:      tokio::sync::watch::Receiver<bool>,
+    server:         std::net::SocketAddr,
+    zone:           hickory_proto::rr::Name,
+    ptr_zone:       Option<hickory_proto::rr::Name>,
+    generator:      Arc<records::RecordGenerator>,
+    tsig:           Option<Arc<dns::TsigConfig>>,
+    concurrency:    usize,
+    total:          Option<u64>,
+    rps:            Option<u32>,
+    transport:      dns::TransportConfig,
+    cancel:         tokio::sync::watch::Receiver<bool>,
+    timeout_ms:     u64,
+    include_ptr:    bool,
+    include_delete: bool,
 ) -> engine::BenchmarkConfig {
     engine::BenchmarkConfig {
         server, zone, ptr_zone, generator, tsig,
         concurrency, total, rps, transport, cancel,
+        timeout_ms, include_ptr, include_delete,
     }
 }
 
@@ -58,16 +62,10 @@ async fn main() {
 
     // ── Benchmark mode: --network provided ───────────────────────────────────
     if let Some(network) = config.network {
-        let ptr_zone = config.ptr_zone.unwrap_or_else(|| {
-            let octets = network.network().octets();
-            let zone_str = match network.prefix_len() {
-                 0..=7  => "in-addr.arpa.".to_string(),
-                 8..=15 => format!("{}.in-addr.arpa.", octets[0]),
-                16..=23 => format!("{}.{}.in-addr.arpa.", octets[1], octets[0]),
-                _       => format!("{}.{}.{}.in-addr.arpa.", octets[2], octets[1], octets[0]),
-            };
-            hickory_proto::rr::Name::from_str_relaxed(&zone_str).expect("valid")
-        });
+        let ptr_zone    = config.ptr_zone; // None = no PTR legs
+        let include_ptr = ptr_zone.is_some();
+        let include_delete = config.delete;
+        let timeout_ms  = config.timeout_ms;
 
         let generator = Arc::new(records::RecordGenerator::new(
             network, config.prefix, config.zone.clone(),
@@ -90,7 +88,7 @@ async fn main() {
                     config.server, config.zone.clone(), ptr_zone.clone(),
                     generator.clone(), tsig_arc.clone(),
                     config.concurrency, None, None, config.transport.clone(),
-                    cancel_rx_perf,
+                    cancel_rx_perf, timeout_ms, include_ptr, include_delete,
                 ),
                 error_target: config.error_target,
                 max_rps:      config.max_rps_cap,
@@ -127,6 +125,7 @@ async fn main() {
                     config.concurrency, config.requests,
                     Some(result.max_sustainable_rps),
                     config.transport, cancel_rx2,
+                    timeout_ms, include_ptr, include_delete,
                 );
                 let pb2 = build_progress_bar(config.requests);
                 let report = engine::run_benchmark(bench_cfg2, pb2).await;
@@ -145,6 +144,7 @@ async fn main() {
                 config.server, config.zone, ptr_zone, generator, tsig_arc,
                 config.concurrency, config.requests, config.rps,
                 config.transport, cancel_rx,
+                timeout_ms, include_ptr, include_delete,
             );
             let pb = build_progress_bar(config.requests);
             let report = engine::run_benchmark(bench_cfg, pb).await;
@@ -153,20 +153,17 @@ async fn main() {
 
     // ── Single-shot mode ──────────────────────────────────────────────────────
     } else {
-        let hostname = config.hostname.expect("hostname required");
-        let ip       = config.ip.expect("ip required");
-        let ptr_zone = config.ptr_zone.unwrap_or_else(|| {
-            let o = ip.octets();
-            hickory_proto::rr::Name::from_str_relaxed(
-                &format!("{}.{}.{}.in-addr.arpa.", o[2], o[1], o[0])
-            ).expect("valid")
-        });
+        let hostname    = config.hostname.expect("hostname required");
+        let ip          = config.ip.expect("ip required");
+        let include_ptr = config.ptr_zone.is_some();
+        let timeout     = Duration::from_millis(config.timeout_ms);
         match dns::run_transaction(
-            config.server, config.zone, ptr_zone, hostname, ip,
-            config.tsig, config.transport,
+            config.server, config.zone, config.ptr_zone,
+            hostname, ip, config.tsig, config.transport,
+            timeout, include_ptr, config.delete,
         ).await {
             Ok(result) => stats::print_report(&result),
-            Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+            Err(e)     => { eprintln!("error: {}", e); std::process::exit(1); }
         }
     }
 }

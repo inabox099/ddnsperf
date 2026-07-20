@@ -77,6 +77,9 @@ pub async fn run_perf_test(cfg: PerfConfig, progress: ProgressBar) -> PerfResult
     let server      = cfg.bench.server;
     let zone        = cfg.bench.zone.clone();
     let ptr_zone    = cfg.bench.ptr_zone.clone();
+    let include_ptr    = cfg.bench.include_ptr;
+    let include_delete = cfg.bench.include_delete;
+    let timeout_ms     = cfg.bench.timeout_ms;
     let generator   = cfg.bench.generator.clone();
     let tsig_arc    = cfg.bench.tsig.clone();
     let transport   = cfg.bench.transport.clone();
@@ -89,18 +92,21 @@ pub async fn run_perf_test(cfg: PerfConfig, progress: ProgressBar) -> PerfResult
 
     let mut task_handles = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
+        let ptr_zone       = ptr_zone.clone();
+        let tsig_arc       = tsig_arc.clone();
+        let transport      = transport.clone();
+        let shared         = shared.clone();
+        let cancel         = cancel_rx.clone();
+        let sent_ok        = sent_ok.clone();
+        let sent_err       = sent_err.clone();
+        let pb             = progress.clone();
+        let include_ptr    = include_ptr;
+        let include_delete = include_delete;
+        let timeout        = std::time::Duration::from_millis(timeout_ms);
+
         let outcome_tx = outcome_tx.clone();
         let gen        = generator.clone();
         let zone       = zone.clone();
-        let ptr_zone   = ptr_zone.clone();
-        let tsig_arc   = tsig_arc.clone();
-        let transport  = transport.clone();
-        let shared     = shared.clone();
-        let cancel     = cancel_rx.clone();
-        let sent_ok    = sent_ok.clone();
-        let sent_err   = sent_err.clone();
-        let pb         = progress.clone();
-
         task_handles.push(tokio::spawn(async move {
             loop {
                 if *cancel.borrow() { break; }
@@ -111,15 +117,17 @@ pub async fn run_perf_test(cfg: PerfConfig, progress: ProgressBar) -> PerfResult
                 let rec  = gen.next();
                 let tsig = tsig_arc.as_deref().cloned();
                 let t0   = Instant::now();
-                let ok   = crate::dns::run_transaction(
+                let ok  = crate::dns::run_transaction(
                     server, zone.clone(), ptr_zone.clone(),
                     rec.hostname, rec.ip, tsig, transport.clone(),
+                    timeout, include_ptr, include_delete,
                 ).await.is_ok();
                 let lat = t0.elapsed().as_micros() as u64;
 
                 if ok { sent_ok.fetch_add(1, Ordering::Relaxed); }
                 else  { sent_err.fetch_add(1, Ordering::Relaxed); }
-                let _ = outcome_tx.send(crate::stats::Outcome { latency_us: lat, success: ok });
+                let error = if ok { None } else { Some(crate::stats::ErrorKind::Transport) };
+                let _ = outcome_tx.send(crate::stats::Outcome { latency_us: lat, error });
                 pb.inc(1);
             }
         }));
@@ -194,14 +202,19 @@ pub async fn run_perf_test(cfg: PerfConfig, progress: ProgressBar) -> PerfResult
         converged,
         search_duration,
         final_report: RunReport {
-            duration:   search_duration,
-            total_sent: total,
+            duration:        search_duration,
+            total_sent:      total,
             total_ok,
             total_err,
-            min_us:     if lat_n == 0 { 0 } else { lat_min },
+            min_us:          if lat_n == 0 { 0 } else { lat_min },
             mean_us,
-            max_us:     lat_max,
+            max_us:          lat_max,
             throughput,
+            concurrency:     0,
+            total_timeout:   0,
+            total_dns_error: 0,
+            total_transport: 0,
+            dns_codes:       vec![],
         },
     }
 }

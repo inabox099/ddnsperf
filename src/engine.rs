@@ -13,16 +13,19 @@ use crate::records::RecordGenerator;
 use crate::stats::{Outcome, RunReport, spawn_collector};
 
 pub struct BenchmarkConfig {
-    pub server:      std::net::SocketAddr,
-    pub zone:        hickory_proto::rr::Name,
-    pub ptr_zone:    hickory_proto::rr::Name,
-    pub generator:   Arc<RecordGenerator>,
-    pub tsig:        Option<Arc<crate::dns::TsigConfig>>,
-    pub concurrency: usize,
-    pub total:       Option<u64>,
-    pub rps:         Option<u32>,
-    pub cancel:      tokio::sync::watch::Receiver<bool>,
-    pub transport:   crate::dns::TransportConfig,
+    pub server:         std::net::SocketAddr,
+    pub zone:           hickory_proto::rr::Name,
+    pub ptr_zone:       Option<hickory_proto::rr::Name>,
+    pub generator:      Arc<RecordGenerator>,
+    pub tsig:           Option<Arc<crate::dns::TsigConfig>>,
+    pub concurrency:    usize,
+    pub total:          Option<u64>,
+    pub rps:            Option<u32>,
+    pub cancel:         tokio::sync::watch::Receiver<bool>,
+    pub transport:      crate::dns::TransportConfig,
+    pub timeout_ms:     u64,
+    pub include_ptr:    bool,
+    pub include_delete: bool,
 }
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -39,20 +42,28 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
     let sent  = Arc::new(AtomicU64::new(0));
     let total = cfg.total.unwrap_or(u64::MAX);
 
+    let ptr_zone    = cfg.ptr_zone.clone();
+    let timeout_ms     = cfg.timeout_ms;
+    let include_ptr    = cfg.include_ptr;
+    let include_delete = cfg.include_delete;
+
     let mut handles = Vec::with_capacity(cfg.concurrency);
 
     for _ in 0..cfg.concurrency {
-        let tx       = tx.clone();
-        let gen      = cfg.generator.clone();
-        let zone     = cfg.zone.clone();
-        let ptr_zone = cfg.ptr_zone.clone();
-        let server   = cfg.server;
-        let limiter  = limiter.clone();
-        let sent     = sent.clone();
-        let tsig_arc = cfg.tsig.clone();
-        let pb       = progress.clone();
-        let cancel   = cfg.cancel.clone();
-        let transport = cfg.transport.clone();
+        let tx         = tx.clone();
+        let gen        = cfg.generator.clone();
+        let zone       = cfg.zone.clone();
+        let ptr_zone   = ptr_zone.clone();
+        let server     = cfg.server;
+        let limiter    = limiter.clone();
+        let sent       = sent.clone();
+        let tsig_arc   = cfg.tsig.clone();
+        let pb         = progress.clone();
+        let cancel     = cfg.cancel.clone();
+        let transport  = cfg.transport.clone();
+        let timeout    = std::time::Duration::from_millis(timeout_ms);
+        let include_ptr    = include_ptr;
+        let include_delete = include_delete;
 
         handles.push(tokio::spawn(async move {
             loop {
@@ -67,8 +78,7 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
                     lim.until_ready().await;
                 }
 
-                let rec = gen.next();
-
+                let rec  = gen.next();
                 let tsig = tsig_arc.as_deref().cloned();
 
                 let t0 = Instant::now();
@@ -80,10 +90,14 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
                     rec.ip,
                     tsig,
                     transport.clone(),
+                    timeout,
+                    include_ptr,
+                    include_delete,
                 ).await;
                 let latency_us = t0.elapsed().as_micros() as u64;
 
-                let _ = tx.send(Outcome { latency_us, success: result.is_ok() });
+                let error = result.err().map(|e| crate::dns::tx_error_to_error_kind(&e));
+                let _ = tx.send(Outcome { latency_us, error });
                 pb.inc(1);
             }
         }));
@@ -96,7 +110,9 @@ pub async fn run_benchmark(cfg: BenchmarkConfig, progress: ProgressBar) -> RunRe
     drop(tx);
     progress.finish_with_message("done");
 
-    collector.await.expect("stats collector panicked")
+    let mut report = collector.await.expect("stats collector panicked");
+    report.concurrency = cfg.concurrency;
+    report
 }
 
 #[cfg(test)]
