@@ -61,7 +61,7 @@ pub struct Args {
     pub concurrency: usize,
 
     /// Per-message response timeout in milliseconds [default: 5000]
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long = "timeout", default_value_t = 5000)]
     pub timeout_ms: u64,
 
     /// Include delete legs in the transaction (Del PTR if --ptr-zone, Del A always).
